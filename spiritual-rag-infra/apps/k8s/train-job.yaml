@@ -1,0 +1,61 @@
+# One-off LoRA training job on the GPU pool. Scales the pool up from zero and back down.
+# Apply with: kubectl apply -f train-job.yaml
+# Delete when done; ttlSecondsAfterFinished also cleans it up after an hour.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lora-train
+  namespace: rag
+  labels:
+    app.kubernetes.io/name: lora-train
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lora-train
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        workload: gpu
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: train
+          image: REGISTRY/spiritual-rag/train:latest   # from the Nebius container registry
+          env:
+            - name: BASE_MODEL
+              value: Qwen/Qwen2.5-7B-Instruct
+            - name: TRAIN_FILE
+              value: /data/train.jsonl
+            - name: OUTPUT_DIR
+              value: /work/output
+            - name: RUN_NAME
+              value: lora-run-01
+            - name: PUSHGATEWAY_URL
+              value: http://prometheus-pushgateway.monitoring.svc:9091
+            - name: HF_HOME
+              value: /work/hf-cache
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: 48Gi
+            requests:
+              cpu: "4"
+              memory: 32Gi
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: data
+              mountPath: /data
+              readOnly: true
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: 80Gi        # checkpoints and model cache; ephemeral by design
+        - name: data
+          configMap:
+            name: train-data      # replace with a PVC or a download step for large corpora

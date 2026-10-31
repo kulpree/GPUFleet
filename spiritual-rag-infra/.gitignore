@@ -1,0 +1,28 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl.bak
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+!*.tfvars.example
+*.tfplan
+
+# Secrets and keys
+*.pem
+*.key
+.env
+.nebius/
+.kube/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Data and outputs
+corpus/
+chunks.jsonl
+output/
+*.safetensors
+*.bin

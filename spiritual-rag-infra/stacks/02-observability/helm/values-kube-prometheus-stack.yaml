@@ -1,0 +1,116 @@
+# Values for kube-prometheus-stack. Keys follow the chart's documented schema.
+# Sensitive values (Grafana password) are injected by Terraform, not stored here.
+
+grafana:
+  defaultDashboardsEnabled: true
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+  persistence:
+    enabled: false   # budget profile: avoid paid volumes; dashboards come from ConfigMaps
+  service:
+    type: ClusterIP
+
+prometheus:
+  prometheusSpec:
+    # Scrape ServiceMonitors and PodMonitors in every namespace, including vLLM and DCGM.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+    storageSpec: {}   # budget profile: no PVC. Metrics reset if the pod restarts.
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+
+nodeExporter:
+  enabled: true
+
+kubeEtcd:
+  enabled: false     # managed control plane; etcd is not reachable from here
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+
+# Starter alert rules. Each one is documented in docs/alerting.md.
+additionalPrometheusRulesMap:
+  spiritual-rag:
+    groups:
+      - name: gpu
+        rules:
+          - alert: GPUIdleWhileRunning
+            expr: avg by (Hostname, gpu) (DCGM_FI_DEV_GPU_UTIL) == 0
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "GPU {{ $labels.gpu }} on {{ $labels.Hostname }} idle for 30 minutes"
+              description: "A GPU node is billed while idle. Scale the GPU pool to 0 if no job is running."
+
+          - alert: GPUMemoryNearFull
+            expr: DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) > 0.95
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "GPU memory above 95% on {{ $labels.Hostname }}"
+
+          - alert: GPUXIDError
+            expr: increase(DCGM_FI_DEV_XID_ERRORS[10m]) > 0
+            labels:
+              severity: critical
+            annotations:
+              summary: "XID error reported on {{ $labels.Hostname }}"
+
+      - name: inference
+        rules:
+          - alert: InferenceP95LatencyHigh
+            expr: histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket[5m]))) > 10
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "vLLM p95 end-to-end latency above 10s"
+
+          - alert: InferenceRequestsQueued
+            expr: sum(vllm:num_requests_waiting) > 20
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "More than 20 inference requests are waiting"
+
+      - name: cost
+        rules:
+          - alert: RunRateExceedsBudget
+            # Run-rate, not cumulative spend. Cumulative spend comes from Nebius billing.
+            expr: sum(node_total_hourly_cost) * 730 > 100
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "Current hourly cluster cost projects above $100 per month"
+
+          - alert: NodeCostWithoutWorkload
+            expr: sum by (node) (node_total_hourly_cost) > 0 and on (node) count by (node) (kube_pod_info) == 0
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Node {{ $labels.node }} is billed with no pods scheduled"

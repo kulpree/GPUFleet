@@ -1,0 +1,57 @@
+{
+  "title": "Spiritual RAG - System and GPU",
+  "uid": "srag-system-gpu",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "tags": ["spiritual-rag", "gpu"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "GPU utilization (%) by GPU",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "{{Hostname}} gpu{{gpu}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "GPU memory used (GiB)",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "DCGM_FI_DEV_FB_USED / 1024", "legendFormat": "{{Hostname}} gpu{{gpu}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decgbytes" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "GPU temperature (C) and power (W)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "DCGM_FI_DEV_GPU_TEMP", "legendFormat": "temp {{Hostname}} gpu{{gpu}}" },
+        { "refId": "B", "expr": "DCGM_FI_DEV_POWER_USAGE", "legendFormat": "power {{Hostname}} gpu{{gpu}}" }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Node CPU usage (cores) and memory (GiB)",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (node) (rate(node_cpu_seconds_total{mode!=\"idle\"}[5m]))", "legendFormat": "cpu {{node}}" },
+        { "refId": "B", "expr": "sum by (node) (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / 1024 / 1024 / 1024", "legendFormat": "mem {{node}}" }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    }
+  ]
+}

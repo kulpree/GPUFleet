@@ -1,0 +1,80 @@
+# RAG API on the CPU pool, with a Service and a ServiceMonitor.
+# Secrets come from a Kubernetes Secret named rag-api-secrets (create it outside Git).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-api
+  namespace: rag
+  labels:
+    app.kubernetes.io/name: rag-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rag-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rag-api
+    spec:
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: api
+          image: REGISTRY/spiritual-rag/rag-api:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: VLLM_URL
+              value: http://inference-vllm.rag.svc:8000/v1
+            - name: VLLM_MODEL
+              value: srag-answer
+            - name: EMBED_MODEL
+              value: intfloat/multilingual-e5-base
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rag-api-secrets
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-api
+  namespace: rag
+spec:
+  selector:
+    app.kubernetes.io/name: rag-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rag-api
+  namespace: rag
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rag-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

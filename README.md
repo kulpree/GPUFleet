@@ -1,452 +1,337 @@
-# 🌐 Multi-Cluster GPU Inference Fleet — Terraform Stack
+# Spiritual-RAG on Nebius: Multi-Region Kubernetes, Training/Inference, and Monitoring
 
-> Provision and operate multiple Kubernetes clusters as a single extended cluster for large-scale NVIDIA GPU inference — using Terraform for every layer.
+Two Terraform stacks that provision a GPU-ready Kubernetes platform on [Nebius AI Cloud](https://nebius.com), plus an open-source observability stack for system, GPU, training, inference, and cost metrics. Both stacks run on [HCP Terraform](https://developer.hashicorp.com/terraform/cloud-docs). The workload is a retrieval-augmented generation (RAG) model over a multilingual corpus of religious and spiritual texts (PDF scriptures, commentaries, and translations).
 
-[![Terraform](https://img.shields.io/badge/Terraform-%3E%3D1.5-7B42BC?logo=terraform)](https://www.terraform.io/)
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-%3E%3D1.28-326CE5?logo=kubernetes)](https://kubernetes.io/)
-[![NVIDIA](https://img.shields.io/badge/NVIDIA-GPU%20Operator-76B900?logo=nvidia)](https://github.com/NVIDIA/gpu-operator)
-[![Karmada](https://img.shields.io/badge/Karmada-CNCF%20Graduated-326CE5)](https://karmada.io/)
-[![Cilium](https://img.shields.io/badge/Cilium-Cluster%20Mesh-F8C517)](https://cilium.io/)
+> **Budget:** this project is designed around a **USD 100 total budget** for Nebius. Read [Cost controls](#cost-controls) before you run anything. GPU time is the dominant cost and is billed per hour. HCP Terraform is billed separately and is covered there too.
 
 ---
 
-## 📖 Table of Contents
+## Contents
 
-- [Overview](#-overview)
-- [Architecture](#-architecture)
-- [Repository Structure](#-repository-structure)
-- [1. Foundational Cloud Infrastructure](#️-1-foundational-cloud-infrastructure-per-cluster)
-- [2. Multi-Cluster Control Plane (Karmada)](#️-2-multi-cluster-control-plane-karmada)
-- [3. Cross-Cluster Networking (Cilium Cluster Mesh)](#-3-cross-cluster-networking-cilium-cluster-mesh)
-- [4. GPU Lifecycle Management (NVIDIA GPU Operator)](#-4-gpu-lifecycle-management-nvidia-gpu-operator)
-- [5. Inference Orchestration Layer](#-5-inference-orchestration-layer)
-- [6. Observability & Cost Governance](#-6-observability--cost-governance)
-- [7. Image & Model Distribution](#-7-image--model-distribution-optional-but-recommended)
-- [Component Summary](#-component-summary)
-- [Getting Started](#-getting-started)
-
----
-
-## 🎯 Overview
-
-This repository contains the Terraform stack to build a **multi-cluster GPU inference fleet**. Instead of one massive cluster, we operate several regional clusters that behave as a single logical cluster through:
-
-- **Karmada** — unified control plane (single Kubernetes API)
-- **Cilium Cluster Mesh** — unified pod network
-- **NVIDIA GPU Operator** — unified GPU lifecycle
-- **Kueue + KServe / vLLM** — unified inference scheduling and serving
-
-This pattern is ideal for large-scale inference where no single cluster has enough GPUs, and where latency, cost, and capacity vary by region.
+- [Architecture](#architecture)
+- [Repository layout](#repository-layout)
+- [HCP Terraform setup](#hcp-terraform-setup)
+- [Quick start](#quick-start)
+- [Stack 1: Platform](#stack-1-platform)
+- [Stack 2: Observability](#stack-2-observability)
+- [Data pipeline (PDF to RAG)](#data-pipeline-pdf-to-rag)
+- [Monitoring](#monitoring)
+- [Cost controls](#cost-controls)
+- [Security notes](#security-notes)
+- [Teardown](#teardown)
+- [Roadmap](#roadmap)
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
-```mermaid
-flowchart TB
-    subgraph Control["🧭 Federation Control Plane"]
-        KARMADA[Karmada API Server<br/>+ Scheduler + Controller]
-        ETCD[(etcd)]
-        KARMADA --- ETCD
-    end
-
-    subgraph ClusterA["☁️ Cluster A (us-east)"]
-        CNIA[Cilium Agent]
-        GPUOPA[GPU Operator]
-        KSERVA[KServe / vLLM]
-        KUEUEA[Kueue]
-    end
-
-    subgraph ClusterB["☁️ Cluster B (eu-west)"]
-        CNIB[Cilium Agent]
-        GPUOPB[GPU Operator]
-        KSERVB[KServe / vLLM]
-        KUEUEB[Kueue]
-    end
-
-    subgraph ClusterC["☁️ Cluster C (ap-south)"]
-        CNIC[Cilium Agent]
-        GPUOPC[GPU Operator]
-        KSERVC[KServe / vLLM]
-        KUEUEC[Kueue]
-    end
-
-    KARMADA -->|PropagationPolicy| ClusterA
-    KARMADA -->|PropagationPolicy| ClusterB
-    KARMADA -->|PropagationPolicy| ClusterC
-
-    CNIA <-->|Cluster Mesh| CNIB
-    CNIB <-->|Cluster Mesh| CNIC
-    CNIA <-->|Cluster Mesh| CNIC
-
-    OBS[📊 Prometheus / Grafana / OpenCost] -.-> Control
-    OBS -.-> ClusterA
-    OBS -.-> ClusterB
-    OBS -.-> ClusterC
+```
+                 ┌──────────────────────── Nebius AI Cloud ────────────────────────┐
+  PDFs / text ─► │ Object Storage (S3-compatible)  ── raw/ , chunks/ , eval/        │
+                 │          │                                                      │
+                 │          ▼                                                      │
+                 │ Region A (primary, GPU)           Region B (optional, CPU/RAG) │
+                 │ ┌────────────────────────┐        ┌──────────────────────────┐  │
+                 │ │ Managed Kubernetes     │        │ Managed Kubernetes       │  │
+                 │ │  - train (GPU pool)    │ ◄────► │  - RAG API (CPU pool)    │  │
+                 │ │  - inference (GPU pool)│  GitOps│  - Vector store replica  │  │
+                 │ │  - vector DB           │        │                          │  │
+                 │ └──────────┬─────────────┘        └────────────┬─────────────┘  │
+                 │            │ metrics / logs / traces           │                │
+                 │            ▼                                   ▼                │
+                 │      Observability stack (Prometheus, Grafana, Loki, OpenCost)  │
+                 └─────────────────────────────────────────────────────────────────┘
+                                   ▲ provisioned by
+                 ┌──────────────── HCP Terraform (remote state + runs) ────────────┐
+                 │  workspace: spiritual-rag-platform-<profile>                    │
+                 │  workspace: spiritual-rag-observability                         │
+                 └─────────────────────────────────────────────────────────────────┘
 ```
 
+**Design choices**
+
+| Concern | Choice | Why |
+|---|---|---|
+| Kubernetes | Nebius Managed Kubernetes (MK8s) | Managed control plane. Worker nodes are billed only while running. GPU node groups ship with NVIDIA drivers and device plugins preinstalled. |
+| IaC runtime | HCP Terraform remote runs, one workspace per stack and profile | State is locked and versioned. Runs are auditable. Secrets stay out of your laptop and out of git. |
+| "Federated" multi-region | Independent clusters managed by GitOps (Argo CD `ApplicationSet`), with an optional Karmada layer later | KubeFed is no longer actively maintained. Independent clusters are simpler to run and cheaper to reason about. |
+| Document storage | Nebius Object Storage (S3-compatible) | Holds raw PDFs, extracted text, and chunks. Works with standard S3 tooling. |
+| Vector search | pgvector on managed PostgreSQL, or Qdrant in-cluster | Start with one option. Both are open source. |
+| Observability | kube-prometheus-stack, DCGM exporter, Grafana, Loki, OpenCost | Open source, widely supported, and covers system, GPU, and cost metrics. |
+| LLM metrics | vLLM `/metrics` endpoint, MLflow for training runs | Inference latency, throughput, and token counts come from vLLM. Training loss and eval metrics go to MLflow. |
+
 ---
 
-## 📁 Repository Structure
+## Repository layout
 
 ```
 .
 ├── README.md
-├── environments/
-│   ├── prod/
+├── stacks/
+│   ├── 01-platform/              # HCP Terraform workspace: networking, storage, K8s, GPU pools
 │   │   ├── main.tf
 │   │   ├── variables.tf
-│   │   └── terraform.tfvars
-│   └── staging/
+│   │   ├── outputs.tf
+│   │   ├── versions.tf           # cloud {} block points to the HCP Terraform workspace
+│   │   └── profiles/
+│   │       ├── budget.md         # documented values for the budget workspace
+│   │       └── multiregion.md
+│   └── 02-observability/         # HCP Terraform workspace: monitoring, dashboards, cost tracking
 │       ├── main.tf
 │       ├── variables.tf
-│       └── terraform.tfvars
-├── modules/
-│   ├── cluster/                 # Cloud K8s + GPU node groups
-│   ├── karmada/                 # Federation control plane
-│   ├── cilium-mesh/             # Cilium + Cluster Mesh
-│   ├── gpu-operator/            # NVIDIA GPU Operator
-│   ├── kueue/                   # MultiKueue
-│   ├── kserve-vllm/             # Model serving stack
-│   └── observability/           # Prometheus/Grafana/OpenCost
-└── policies/
-    ├── propagation-policies.yaml
-    ├── override-policies.yaml
-    └── cluster-queues.yaml
+│       ├── versions.tf
+│       ├── helm/values-*.yaml
+│       └── dashboards/*.json     # Grafana dashboards as code
+├── apps/
+│   ├── ingest/                   # PDF → text → chunks → embeddings
+│   ├── train/                    # fine-tuning jobs (Kubernetes Jobs)
+│   └── rag-api/                  # retrieval + generation service
+└── .github/workflows/            # optional: trigger HCP Terraform runs from CI
 ```
 
 ---
 
-## 🏛️ 1. Foundational Cloud Infrastructure (per cluster)
+## HCP Terraform setup
 
-Each Kubernetes cluster must first exist with GPU-capable nodes. Terraform provisions the managed Kubernetes service (EKS, AKS, GKE) along with dedicated node groups.
+Do this once.
 
-### Key Terraform resources / modules
+1. **Create an organization** in HCP Terraform, or use an existing one.
+2. **Create a project** named `spiritual-rag`. Use projects to group the workspaces and limit team access.
+3. **Create two workspaces** (CLI-driven or VCS-driven; both work):
 
-| Component | Terraform Module | Notes |
+   | Workspace | Working directory | Purpose |
+   |---|---|---|
+   | `spiritual-rag-platform-budget` | `stacks/01-platform` | Single-region, CPU-first, GPU pool at 0 |
+   | `spiritual-rag-observability` | `stacks/02-observability` | Monitoring and dashboards |
+
+   Add a third workspace, `spiritual-rag-platform-multiregion`, only after the budget profile works.
+
+4. **Enable remote state sharing** on `spiritual-rag-platform-budget` and allow `spiritual-rag-observability` to read it. The observability stack needs the cluster endpoint and kubeconfig from the platform stack.
+5. **Add a run trigger** so `spiritual-rag-observability` runs after `spiritual-rag-platform-budget` applies successfully.
+6. **Create a variable set** named `nebius-credentials` and attach it to both workspaces. Put the Nebius service account credentials there as **sensitive** variables or environment variables, following the [Nebius authentication guide](https://docs.nebius.com/terraform-provider/authentication). Do not put them in `.tf` or `.tfvars` files.
+7. **Set workspace variables** for the non-secret settings listed in each stack's section below.
+8. **Log in from your machine** so you can run the CLI commands in this README:
+
+   ```bash
+   terraform login
+   ```
+
+Keep the HCP Terraform API token out of git. Use `terraform login` or an environment variable.
+
+---
+
+## Quick start
+
+```bash
+# 1. Platform: networking, object storage, Kubernetes, GPU pool (scaled to 0 by default)
+cd stacks/01-platform
+terraform init
+terraform plan     # queues a remote plan in spiritual-rag-platform-budget
+terraform apply    # queues a remote apply; approve in the HCP Terraform UI
+
+# 2. Fetch kubeconfig for the cluster (sensitive output, read from remote state)
+terraform output -raw kubeconfig > ~/.kube/spiritual-rag.yaml
+export KUBECONFIG=~/.kube/spiritual-rag.yaml
+
+# 3. Observability runs automatically via the run trigger. To run it by hand:
+cd ../02-observability
+terraform init
+terraform apply
+
+# 4. Port-forward Grafana (or expose it behind an authenticated ingress)
+kubectl -n monitoring port-forward svc/grafana 3000:80
+```
+
+Grafana runs at `http://localhost:3000`. Change the default admin password on first login.
+
+---
+
+## Stack 1: Platform
+
+Workspace: `spiritual-rag-platform-budget`.
+
+Creates:
+
+- A VPC and subnets in each configured region.
+- A Managed Kubernetes cluster per region. The control plane is managed.
+- Node groups:
+  - `system` (CPU, always on, small)
+  - `cpu-workers` (CPU, for ingest and the RAG API)
+  - `gpu-train` and `gpu-infer` (GPU, **min size 0** by default)
+- An Object Storage bucket for `raw/` PDFs, `chunks/`, and `eval/` results.
+- A container registry for the app images.
+- Service accounts with least-privilege roles, one per workload.
+
+**Workspace variables** (set in HCP Terraform, not in files):
+
+| Variable | Budget value | Notes |
 |---|---|---|
-| **Cluster** | `terraform-aws-modules/eks/aws` | Control plane, IAM, security groups |
-| **GPU Node Group** | Managed node group with `g6e.8xlarge`, `p4d.24xlarge`, `a3-highgpu-8g` | Taints: `nvidia.com/gpu:NoSchedule`; Labels: `accelerator=nvidia-gpu` |
-| **EFA / high-speed networking** | EFA-enabled node group + placement group | Required for multi-node tensor parallelism |
-| **Model storage** | EFS / FSx for Lustre | Shared filesystem for model checkpoints |
+| `primary_region` | `eu-north1` | Check current GPU availability and price per region |
+| `gpu_preset` | a single-GPU preset | Pick from the Nebius catalog |
+| `gpu_min_size` | `0` | Scale-to-zero default |
+| `gpu_max_size` | `1` | Hard cap on GPU nodes |
+| `enable_secondary_region` | `false` | Keep `false` until the budget profile works |
 
-### Example
+Variable names are illustrative. Confirm resource argument names against the [provider reference](https://docs.nebius.com/terraform-provider/reference/index) before applying.
 
-```hcl
-module "gpu_node_group" {
-  source = "terraform-aws-modules/eks/aws//modules/eks-managed-node-group"
+Because remote runs do not accept `-var-file`, the profile docs in `profiles/` list the values to copy into each workspace. Use one workspace per profile instead of switching files.
 
-  cluster_name    = module.eks.cluster_name
-  cluster_version = "1.30"
+### Multi-region notes
 
-  instance_types = ["g6e.8xlarge"]
-  capacity_type  = "ON_DEMAND"
-
-  taints = [{
-    key    = "nvidia.com/gpu"
-    value  = "present"
-    effect = "NO_SCHEDULE"
-  }]
-
-  labels = {
-    accelerator = "nvidia-gpu"
-    workload    = "inference"
-  }
-
-  enable_efa_support = true
-  placement_group_name = aws_placement_group.gpu_pg.name
-}
-```
-
-> **Why this layer matters:** Without Terraform-managed node groups, GPU node drift (mismatched drivers, missing device plugins) silently breaks inference. IaC enforces consistent GPU node configuration across every cluster in the fleet.
+- Put the primary cluster and the GPU pools in one region. Cross-region traffic and data movement add cost and latency.
+- The secondary region runs the stateless RAG API on CPU nodes. Reads come from a replicated vector store, and GitOps keeps both clusters on the same manifests.
+- Write paths (ingest, training) run only in the primary region.
 
 ---
 
-## ☸️ 2. Multi-Cluster Control Plane (Karmada)
+## Stack 2: Observability
 
-[Karmada](https://karmada.io/) provides a **federation control plane** presenting multiple member clusters through a single Kubernetes API. It does not replace underlying clusters; it sits above them.
+Workspace: `spiritual-rag-observability`.
 
-### Control plane components
-
-- **Karmada API Server** — unified entry point for workloads
-- **Karmada Controller Manager** — propagates resources to members
-- **Karmada Scheduler** — places workloads via `PropagationPolicy`
-- **etcd** — federation state store
-
-### Key CRDs managed by Terraform
-
-| CRD | Purpose |
-|---|---|
-| **`PropagationPolicy`** | Map a Deployment/InferenceService to member clusters, define replica distribution (e.g. 70% east / 30% west) |
-| **`OverridePolicy`** | Rewrite cluster-specific fields (image registry, StorageClass, GPU type) |
-| **`FederatedHPA`** | Horizontal autoscaling across clusters on aggregate GPU util |
-
-### Example `PropagationPolicy`
-
-```yaml
-apiVersion: policy.karmada.io/v1alpha1
-kind: PropagationPolicy
-metadata:
-  name: vllm-inference
-spec:
-  resourceSelectors:
-    - apiVersion: serving.kserve.io/v1beta1
-      kind: InferenceService
-      name: llama-3-70b
-  placement:
-    clusterAffinity:
-      clusterNames: [us-east, eu-west, ap-south]
-    replicaScheduling:
-      replicaSchedulingType: Divided
-      replicaDivisionPreference: Weighted
-      weightPreference:
-        staticWeightList:
-          - targetCluster: { clusterNames: [us-east] }
-            weight: 50
-          - targetCluster: { clusterNames: [eu-west] }
-            weight: 30
-          - targetCluster: { clusterNames: [ap-south] }
-            weight: 20
-```
-
-> **Why Karmada:** It reached CNCF graduation and is purpose-built for spreading GPU/AI workloads across clusters when no single cluster has enough accelerators.
-
----
-
-## 🌐 3. Cross-Cluster Networking (Cilium Cluster Mesh)
-
-[Cilium Cluster Mesh](https://docs.cilium.io/en/stable/network/clustermesh/) connects pod networks of all member clusters into **one logical network** — enabling cross-cluster pod-to-pod connectivity, global service discovery, and cross-cluster load balancing without a per-service ingress or VPN.
-
-### Terraform implementation
-
-- Deploy **Cilium** as CNI via `helm_release` on every cluster
-- Enable **Cluster Mesh** with shared `cluster-name` / `cluster-id`
-- Define **global services** so inference requests route to any healthy replica
-
-### Example
-
-```hcl
-resource "helm_release" "cilium" {
-  name       = "cilium"
-  namespace  = "kube-system"
-  repository = "https://helm.cilium.io"
-  chart      = "cilium"
-  version    = "1.17.0"
-
-  values = [yamlencode({
-    cluster = {
-      name = var.cluster_name
-      id   = var.cluster_id
-    }
-    clustermesh = {
-      useAPIServer         = true
-      apiserverServiceType = "NodePort"
-      config = {
-        enabled = true
-      }
-    }
-    ipam = { mode = "cluster-pool" }
-  })]
-}
-```
-
-### Why this is critical for GPU inference
-
-- **Capacity spillover:** A request arriving at a saturated cluster is transparently forwarded to a pod in another cluster with free GPU.
-- **Disaggregated inference:** Pre-processing in one cluster, GPU inference in another, post-processing in a third — all over the mesh.
-
----
-
-## 🎮 4. GPU Lifecycle Management (NVIDIA GPU Operator)
-
-The [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) automates the entire GPU software stack per node: driver installation, container runtime config, device plugin, MIG manager, and DCGM metrics exporter.
-
-### Terraform implementation
-
-- Install via **Helm** as a `helm_release` on every member cluster
-- Set `driver.enabled=false` if the cloud node image already ships with a driver
-- Enable **MIG** (A100/H100) or **time-slicing** for smaller services
-
-### GPU sharing strategies
-
-| Strategy | Use Case |
-|---|---|
-| **MIG** | Hardware partitioning, strict isolation, multi-tenant inference |
-| **MPS** | Multiple CUDA processes sharing a GPU; small-batch or parallelizable jobs |
-| **Time-slicing** | Oversubscription for bursty, non-latency-critical workloads |
-
-### Example
-
-```hcl
-resource "helm_release" "gpu_operator" {
-  name             = "gpu-operator"
-  namespace        = "gpu-operator"
-  create_namespace = true
-  repository       = "https://helm.ngc.nvidia.com/nvidia"
-  chart            = "gpu-operator"
-  version          = "v25.3.0"
-
-  set {
-    name  = "driver.enabled"
-    value = "false"   # cloud AMI already has driver
-  }
-  set {
-    name  = "migManager.enabled"
-    value = "true"
-  }
-}
-```
-
-> The GPU Operator is the **node-level complement** to Karmada's cluster-level scheduling. Karmada decides *which cluster* receives a workload; the GPU Operator ensures that cluster's GPUs are discoverable and efficiently shared.
-
----
-
-## 🚀 5. Inference Orchestration Layer
-
-### A. Kueue (multi-cluster job queueing)
-
-[Kueue](https://kueue.sigs.k8s.io/) provides queue-based admission control for GPU-hungry workloads. With **MultiKueue**, one control cluster dispatches jobs to the cheapest/most-available GPU pool across regions.
-
-- Terraform installs Kueue via Helm
-- Configure `ResourceFlavor` and `ClusterQueue` CRDs mapped to GPU node pools
-
-```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
-kind: ClusterQueue
-metadata:
-  name: gpu-inference-queue
-spec:
-  namespaceSelector: {}
-  resourceGroups:
-    - coveredResources: ["nvidia.com/gpu"]
-      flavors:
-        - name: a100-flavor
-          resources:
-            - name: nvidia.com/gpu
-              nominalQuota: 64
-```
-
-### B. KServe / vLLM (model serving)
-
-- **KServe** provides the `InferenceService` CRD with scale-to-zero and canary rollouts. Terraform deploys the controller via Helm.
-- **vLLM** is the recommended engine for LLMs. For multi-node tensor parallelism, deploy vLLM behind **LeaderWorkerSet (LWS)** on EFA-enabled node groups.
-- Terraform creates the ECR repository for the vLLM image and the LWS Helm release.
-
-### C. Gateway / API layer
-
-- **Envoy Gateway** or **Istio multi-primary mesh** routes inference requests, enforces API-key auth, and applies rate limits.
-
----
-
-## 📊 6. Observability & Cost Governance
-
-Operating a multi-cluster GPU fleet without centralized observability is untenable.
+Installs into each cluster:
 
 | Component | Purpose |
 |---|---|
-| **Prometheus + Grafana + Loki** | Per-cluster metrics/logs, federated to a central Grafana |
-| **DCGM Exporter** | GPU utilization, memory, temperature, ECC errors |
-| **Karmada metrics** | Propagation latency, cluster health |
-| **OpenCost** | GPU cost per namespace / per model endpoint |
+| `kube-prometheus-stack` | Prometheus, Alertmanager, Grafana, node and kube-state exporters |
+| `dcgm-exporter` | Per-GPU utilization, memory, temperature, power, and XID errors |
+| `loki` + `promtail` | Logs from training and inference pods |
+| `OpenCost` | Cost allocation per namespace, workload, and label |
+| Grafana dashboards (as code) | System, GPU, training, inference, and cost views |
 
-Terraform deploys all of these via Helm; Grafana datasources are federated through a central Prometheus (Thanos or Mimir recommended).
+This stack reads the cluster endpoint and kubeconfig from `spiritual-rag-platform-budget` through remote state. It needs no separate credentials for the cluster.
+
+### Dashboards
+
+| Dashboard | Key panels |
+|---|---|
+| **System** | CPU, memory, disk, network per node and per pod; pod restarts; node pressure |
+| **GPU** | Utilization, framebuffer use, temperature, power draw, idle GPU-hours |
+| **Training** | Loss, eval score, tokens/sec, steps/sec, checkpoint age, job status (from MLflow metrics or pushed via Pushgateway) |
+| **Inference** | Request rate, p50/p95/p99 latency, time-to-first-token, tokens/sec, queue depth, KV-cache use (from vLLM `/metrics`) |
+| **RAG quality** | Retrieval hit rate, chunks per query, answer latency, language mix of queries, fallback rate |
+| **Cost** | Spend per namespace, GPU-hours today and this month, projected month-end spend against the USD 100 budget |
+
+### Alerts (starter set)
+
+- GPU idle for more than 30 minutes while a GPU pool is running. This is the most common source of wasted budget.
+- Projected monthly spend above 80% of budget.
+- Inference p95 latency above your SLO for 10 minutes.
+- Training job stuck: no step progress for 15 minutes.
+- Object storage or vector store disk above 80%.
 
 ---
 
-## 📦 7. Image & Model Distribution (optional but recommended)
+## Data pipeline (PDF to RAG)
 
-Cold-start latency dominates GPU inference cost. Terraform can provision:
+1. **Ingest** (`apps/ingest`, CPU pool). Upload PDFs to `raw/<lang>/<tradition>/<work>.pdf`. Extract text with a PDF library. Use OCR (for example, Tesseract with the right language packs) for scanned pages. Non-Latin scripts need explicit language packs.
+2. **Normalize.** Store Unicode as UTF-8 NFC. Keep page numbers, chapter and verse references, and the source language as metadata.
+3. **Chunk.** Chunk by section or verse, not by fixed characters, so citations stay meaningful. Keep a parallel-translation link when a text has translations.
+4. **Embed and index.** Use a multilingual embedding model. Store vectors in pgvector or Qdrant with the metadata above.
+5. **Train or tune** (`apps/train`, GPU pool, scaled up only for the run). Start with retrieval tuning and prompt design before any fine-tuning. Fine-tuning is the most expensive step and the least likely to be needed.
+6. **Serve** (`apps/rag-api`). Retrieve, rerank, then generate with citations back to the source passage.
+7. **Evaluate** with a held-out set of question and answer pairs in each language. Track results in MLflow.
 
-- **P2P image distribution** (Zot + Spegel) for peer-to-peer pulls
-- **Geo-replicated container registry** (ECR replication, ACR geo-replication)
-- **Shared model weights filesystem** mounted across GPU nodes so new pods start serving without downloading multi-GB weights
+> **Content note:** Religious texts vary by tradition, translation, and edition. Record the edition and translator for every chunk. Answers should cite the passage, and the system prompt should tell the model to say when a source does not cover a question.
 
 ---
 
-## 📋 Component Summary
+## Monitoring
 
-| Layer | Terraform-managed component | Role |
+Open the Grafana **Cost** dashboard before starting any GPU job. Confirm three things:
+
+1. The GPU pool has `gpu_min_size = 0` or a planned stop time.
+2. The projected spend for the run fits the remaining budget.
+3. An alert exists for idle GPUs.
+
+For the inference service, expose vLLM's `/metrics` to Prometheus with a `ServiceMonitor`. Scrape DCGM for GPU health. Push training metrics from MLflow or a Pushgateway.
+
+---
+
+## Cost controls
+
+### Nebius (the USD 100 budget)
+
+Nebius pricing changes, and GPU prices are the main driver. Check the current [Nebius pricing page](https://nebius.com/prices) before each apply. Third-party trackers report on-demand H100 pricing around USD 3.85 to 4.50 per GPU-hour, with preemptible pricing around USD 2.15. Nebius raised on-demand GPU prices effective October 1, 2026, so verify these numbers yourself.
+
+**What USD 100 buys at those rates (GPU only):**
+
+| GPU type | Approx. hours at USD 4.50/h (on-demand) | Approx. hours at USD 2.15/h (preemptible) |
 |---|---|---|
-| **Cloud infra** | EKS/AKS/GKE module + GPU node groups + EFA | Provision clusters and GPU nodes with taints, labels, networking |
-| **Federation** | Karmada + `PropagationPolicy` / `OverridePolicy` | Unified API; place workloads by GPU capacity and region |
-| **Networking** | Cilium Cluster Mesh | Connect pod networks; global services, cross-cluster LB |
-| **GPU lifecycle** | NVIDIA GPU Operator | Drivers, device plugin, MIG/time-slicing, GPU metrics |
-| **Inference scheduling** | Kueue MultiKueue + KServe/vLLM + LWS | Queue jobs, serve models, scale across GPU pools |
-| **Observability** | Prometheus / Grafana / Loki / OpenCost | GPU utilization, federation health, cost tracking |
+| 1x H100 | ~22 h | ~46 h |
 
-> **Key architectural insight:** No single component makes clusters "extended." **Karmada** provides the logical single API, **Cilium Cluster Mesh** provides the single network, and **GPU Operator + Kueue** provide a unified GPU scheduling surface. **Terraform** is what makes this repeatable — every new GPU region or cluster is provisioned consistently with the rest of the fleet.
+Storage, egress, and CPU nodes also count. Treat the table as a ceiling, not a plan.
+
+**Budget plan**
+
+| Item | Allocation | Notes |
+|---|---|---|
+| GPU training runs | USD 40 | Short runs only. Use preemptible capacity if your checkpoints are frequent. |
+| GPU inference demo | USD 20 | Start the pool, run the demo, stop it. |
+| CPU nodes and control planes | USD 15 | Keep the cluster small. Leave the secondary region off. |
+| Object storage and vector DB | USD 10 | PDFs are small. Track `chunks/` and `eval/` growth. |
+| Egress and registry | USD 5 | Pull images from inside the region where possible. |
+| Reserve | USD 10 | Do not spend this. It covers surprises. |
+
+**Rules**
+
+1. **Single region** until the pipeline works. The `multiregion` workspace roughly doubles the baseline cost.
+2. **GPU pools default to 0 nodes.** Scale up only for a run. End each job with a Kubernetes `Job` that has `ttlSecondsAfterFinished`, and scale the pool back to 0 afterward.
+3. **Use CPU for development.** Chunking, embedding small corpora, and testing the API do not need a GPU.
+4. **Prefer preemptible GPU capacity** for training jobs with checkpoints. Checkpoint every few minutes.
+5. **Cap GPU nodes in the workspace.** Keep `gpu_max_size` low. Change it only for a planned run, and set it back to `0` afterward.
+6. **Check spend daily.** Use the Cost dashboard. If your Nebius billing console offers budget alerts, enable them at USD 50 and USD 80. If it does not, rely on the projected-spend alert above.
+7. **Use managed inference only if it is cheaper** than running your own GPU pool for your query volume. Compare per 1,000 requests before choosing.
+
+### HCP Terraform (separate from the Nebius budget)
+
+HCP Terraform bills per **managed resource** (each resource with `mode = "managed"` in state). The Free tier includes 500 managed resources at no charge. Above that, a per-resource monthly rate applies.
+
+- Keep the budget profile well under 500 resources. Node pools, subnets, and buckets each count as one resource. Helm releases and Kubernetes manifests managed by Terraform each count too.
+- Manage Kubernetes manifests with Argo CD, not Terraform, to keep the Terraform resource count low.
+- Check the **Usage** page in HCP Terraform each month. Plan and pricing details differ between sources, so confirm the current terms in your organization's plan settings.
+- Cost estimation in plan output depends on your plan and on Nebius provider support. Confirm it in your organization's settings before relying on it.
 
 ---
 
-## 🚀 Getting Started
+## Security notes
 
-### Prerequisites
+- Use a Nebius service account for HCP Terraform. Grant only the roles it needs.
+- Store Nebius credentials in a sensitive HCP Terraform variable set, not in code or `tfvars`.
+- Mark outputs that contain secrets as `sensitive` (kubeconfig, registry credentials). Remote state still stores them, so limit who can read the workspace.
+- Limit workspace and project access to the people who need it.
+- Keep the Object Storage bucket private. Use presigned URLs for uploads.
+- Restrict Grafana and Prometheus to your own network or an authenticated ingress. Do not expose them publicly.
+- Religious and personal documents may contain private material. Do not put personal data in logs, traces, or prompts.
 
-- Terraform ≥ 1.5
-- Cloud credentials with permissions for EKS/AKS/GKE, EC2/VM, EFS/FSx
-- `kubectl` and `helm` installed locally
-- Domain name (optional) for Karmada and inference endpoints
+---
 
-### Bootstrap
+## Teardown
+
+Destroy in reverse order to stop all billing. Use the HCP Terraform UI or the CLI:
 
 ```bash
-# 1. Clone
-git clone https://github.com/<your-org>/gpu-fleet-terraform.git
-cd gpu-fleet-terraform
-
-# 2. Configure environments/prod/terraform.tfvars
-cp environments/prod/terraform.tfvars.example environments/prod/terraform.tfvars
-$EDITOR environments/prod/terraform.tfvars
-
-# 3. Provision clusters + GPU nodes
-cd environments/prod
-terraform init
-terraform plan -out=tfplan
-terraform apply tfplan
-
-# 4. Fetch kubeconfigs
-aws eks update-kubeconfig --name gpu-fleet-us-east   --alias us-east
-aws eks update-kubeconfig --name gpu-fleet-eu-west   --alias eu-west
-aws eks update-kubeconfig --name gpu-fleet-ap-south  --alias ap-south
-
-# 5. Verify federation
-kubectl --context karmada get clusters
-kubectl --context karmada get propagationpolicy -A
+cd stacks/02-observability && terraform destroy
+cd ../01-platform          && terraform destroy
 ```
 
-### Verify GPU health
-
-```bash
-kubectl --context us-east get nodes -l accelerator=nvidia-gpu
-kubectl --context us-east get pods -n gpu-operator
-kubectl --context us-east get pods -n kube-system -l k8s-app=cilium
-```
-
-### Deploy a sample inference workload
-
-```bash
-kubectl --context karmada apply -f policies/propagation-policies.yaml
-kubectl --context karmada apply -f examples/llama-3-70b-inferenceservice.yaml
-kubectl --context karmada get inferenceservice -A
-```
+Confirm in the Nebius console that no GPU instances, load balancers, or unattached disks remain. Object Storage buckets with data are not removed by `destroy` unless you configure it to be. Check them separately.
 
 ---
 
-## 📚 References
+## Roadmap
 
-- [Karmada documentation](https://karmada.io/docs/)
-- [Cilium Cluster Mesh](https://docs.cilium.io/en/stable/network/clustermesh/)
-- [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/)
-- [Kueue MultiKueue](https://kueue.sigs.k8s.io/docs/concepts/multikueue/)
-- [KServe](https://kserve.github.io/website/)
-- [vLLM production stack](https://github.com/vllm-project/production-stack)
-
----
-
-## 📄 License
-
-Apache 2.0 — see [LICENSE](LICENSE).
+- [ ] HCP Terraform: project, workspaces, variable set, run trigger
+- [ ] Stack 1: single-region budget profile
+- [ ] Stack 2: kube-prometheus-stack, DCGM, Grafana dashboards as code
+- [ ] Ingest pipeline for PDFs with OCR and multilingual normalization
+- [ ] RAG API with citations
+- [ ] Evaluation set per language and tradition
+- [ ] Cost guardrails: scheduled scale-to-zero and budget alerts
+- [ ] Optional: second region for the RAG API (`multiregion` workspace)
+- [ ] Optional: Karmada for cross-cluster scheduling
 
 ---
 
-*Maintained by the Platform Engineering team. For questions, open an issue or ping `#gpu-fleet` on Slack.*
+## License
+
+Choose a license before publishing. Apache-2.0 or MIT are common choices for infrastructure code.

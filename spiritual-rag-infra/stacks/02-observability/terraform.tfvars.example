@@ -1,0 +1,21 @@
+# Copy to terraform.tfvars (git-ignored). Never commit the Grafana password.
+
+kube_context = "spiritual-rag-primary" # kubectl config get-contexts
+
+kubeconfig_path        = "~/.kube/spiritual-rag.yaml"
+namespace              = "monitoring"
+monthly_budget_usd     = 100
+prometheus_retention   = "15d"
+loki_retention_hours   = 168
+grafana_ingress_enabled = false
+
+# Pin chart versions after checking the chart repositories. Null means latest.
+kube_prometheus_stack_version = null
+dcgm_exporter_version         = null
+loki_version                  = null
+promtail_version              = null
+opencost_version              = null
+pushgateway_version           = null
+
+# Set this in the shell instead of here:
+#   export TF_VAR_grafana_admin_password='...'

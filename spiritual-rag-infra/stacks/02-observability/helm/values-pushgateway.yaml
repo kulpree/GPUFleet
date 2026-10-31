@@ -1,0 +1,19 @@
+# Values for prometheus-pushgateway. Training jobs push metrics here.
+
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  additionalLabels:
+    release: kube-prometheus-stack   # lets the Prometheus operator select this monitor
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# Stale training metrics stay visible after a job ends. Delete them after each run
+# with: curl -X DELETE http://prometheus-pushgateway.monitoring.svc:9091/metrics/job/<job>
+persistentVolume:
+  enabled: false

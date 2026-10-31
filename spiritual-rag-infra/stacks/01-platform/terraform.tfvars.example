@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Local runs read this file.
+# In HCP Terraform, set the same keys as workspace variables instead.
+
+project_id = "project-e00xxxxxxxxxxxxxxx"   # nebius project id
+subnet_id  = "vpcsubnet-e00xxxxxxxxxxxxxx" # nebius vpc subnet list --format json
+
+cluster_name = "spiritual-rag-primary"
+region_label = "eu-north1"
+
+admin_cidrs = ["203.0.113.10/32"] # replace with your public IP /32
+
+etcd_cluster_size = 1
+k8s_version       = "1.32"
+
+# Budget profile: GPU pool scaled to zero, single GPU maximum.
+gpu_min_size        = 0
+gpu_max_size        = 1
+budget_gpu_node_cap = 1
+gpu_preemptible     = true
+
+bucket_name   = "spiritual-rag-corpus-CHANGE-ME"
+registry_name = "spiritual-rag"

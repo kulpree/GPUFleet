@@ -1,0 +1,17 @@
+# Values for Promtail, which ships pod logs to Loki.
+
+config:
+  clients:
+    - url: http://loki.monitoring.svc:3100/loki/api/v1/push
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+tolerations:
+  - key: nvidia.com/gpu        # collect logs from GPU nodes too
+    operator: Exists
+    effect: NoSchedule
